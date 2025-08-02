@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",         // Or a recent ES version like ES2022, ES2021
+    "module": "NodeNext",       // Crucial for modern Node.js ESM compatibility
+    "moduleResolution": "NodeNext", // Also important for module resolution logic
+    "esModuleInterop": true,    // Allows default imports from CommonJS modules
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "sourceMap": true,
+    "skipLibCheck": true,
+    "outDir": "./dist",         // Where compiled JS goes
+    "rootDir": "./"             // Your source root
+  },
+  "include": [
+    "**/*.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}
