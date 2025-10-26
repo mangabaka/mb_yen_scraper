@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { fa } from 'zod/v4/locales'
 
 const imprints = z.enum(['Yen Press', 'Yen On', 'JY', 'Yen Audio', 'Ize Press', 'J-Novel Club'])
 
@@ -55,6 +54,7 @@ const volume = z.object({
 	price: null_array(currency).nullish(),
 	pages: z.number().nullish(),
 	trim: trim.nullish(),
+	digital: z.boolean().default(false)
 })
 
 const chapter = z.object({
@@ -74,6 +74,7 @@ const chapter = z.object({
 	price: null_array(currency).nullish(),
 	pages: z.number().nullish(),
 	trim: trim.nullish(),
+	digital: z.boolean().default(false)
 })
 
 export const YenPressMangaBakaSeries = z.object({
@@ -82,7 +83,7 @@ export const YenPressMangaBakaSeries = z.object({
 	series_is_chapter: z.boolean().default(false),
 	series_main_slug: z.string().nullish(), // Infer by removing '-serial'
 	link: z.string().url().nullish(),
-	type: z.enum(['manga', 'manhwa', 'light novel', 'art book']),
+	type: z.enum(['manga', 'manhwa', 'light novel', 'audiobook', 'art book']),
 	volume_count: z.number().nullish(),
 	chapter_count: z.number().nullish(),
 	cover: z.string().url().nullish(),

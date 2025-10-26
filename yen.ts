@@ -1,22 +1,7 @@
 import { string_to_date } from './date.js'
-import { XMLParser, XMLBuilder, XMLValidator} from 'fast-xml-parser'
-//import { Logger } from '$lib/logger'
-//import SeriesNews from '$lib/server/models/SeriesNews.model'
+import { XMLParser } from 'fast-xml-parser'
 import { YenPressMangaBakaSeries } from './yen.types.js'
-import axios from 'axios'
-import * as cheerio from 'cheerio'
 import { http_request } from './runner.js'
-import { readFile } from 'fs/promises'
-//import tracer, { type TraceOptions } from 'dd-trace'
-//import { kinds } from 'dd-trace/ext'
-//import tags from 'dd-trace/ext/tags'
-import type { Job } from 'pg-boss'
-import { ja, no, sl, tr } from 'zod/v4/locales'
-import { AnyNode } from 'domhandler'
-import { number, uuid } from 'zod/v4'
-//import parser from 'xml2json'
-//import SourceAnimeNewsNetwork from '../models/SourceAnimeNewsNetwork.model'
-//import { Queue, QueueClient } from '../queue'
 
 enum imprints {
 	'Yen Press' = 'https://yenpress.com',
@@ -56,6 +41,11 @@ export async function get_sitemap(): Promise<Record<string, any>> {
 
 				if (type && slug) {
 					if (type == 'series') {
+						// Some series are lies
+						const slug_match = /\d$|-novel$/i.exec(slug)
+						if (slug_match) {
+							continue
+						}
 						series.push({
 							'slug': slug,
 							'url': url.toString(),
@@ -93,16 +83,34 @@ export async function parse_book_page(slug: string): Promise<Record<string, any>
 		throw new Error('A slug is required')
 	}
 	
+	function extract_prices(prices: string): Record<string, string | null>[] | null {
+		// Presumes there is always a US price first and Canandian one second
+		if (prices === null) {
+			return null
+		}
+		const price_split = prices?.split(' / ')
+		const price_us = price_split?.[0]?.slice(1, -3) || null
+		const price_can = price_split?.[1]?.slice(1, -3) || null
+
+		if (price_us && price_can) {
+			return [{'value': price_us, 'iso_code': 'usd'}, {'value': price_can, 'iso_code': 'cad'}]
+		}
+		return null
+	}
+
 	try {
 		const url = 'https://yenpress.com/titles/' + slug
 		const $ = await http_request(url)
 		const series_data: Record<string, any> = {}
 		const staff: Record<string, string | null>[] = []
-		const volumes: Record<string, any>[] = []
-		const volume: Record<string, any> = {}
+		const works: Record<string, any>[] = []
+		const paperback: Record<string, any> = {}
+		const digital: Record<string, any> = {}
 		const related: Record<string, any>[] = []
 
-		const series_title_raw = $('div.heading-content .heading')?.text()
+		const book_title_raw = $('div.heading-content .heading')?.text()
+		const book_title_details = clean_series_title(book_title_raw)
+		const series_title_raw = $('div.detail-info div.detail-box')?.first()?.children('p')?.text().trim()
 		const series_title_details = clean_series_title(series_title_raw)
 
 		series_data['series_slug'] = $('a.main-btn')?.attr('href')?.replace('/series/', '')
@@ -141,54 +149,114 @@ export async function parse_book_page(slug: string): Promise<Record<string, any>
 			}
 		}
 
-		const prices = $('p.book-price').text()
-		const prices_split = prices?.split(' / ')
-		const price_us = prices_split?.[0]?.slice(1, -3) || null
-		const price_can = prices_split?.[1]?.slice(1, -3) || null
-
+		// Paperback/digital
+		const tabs = $('div.buy-info div.tabs')?.text().trim().toLowerCase()
+		const has_paperback = tabs.includes('paperback') || tabs.includes('audio')
+		const has_digital = tabs.includes('digital')
 		const book_details = $('section.book-details')
-		// Imprint frequently div not tagged with class detail-box...
-		const imprint = book_details.find('div.detail-info span:contains("Imprint")')?.next()?.text()
+		const book_details_info = book_details.find('.detail-info')
+		const prices_all = $('p.book-price')
 
-		const genres = book_details.find('div.detail-labels').first()?.children('a').map(function (i, ele) {
-			return $(ele).text()
-		}).toArray()
-		const book_box_details = book_details.find('div.detail-box')?.children()
-		for (const box of book_box_details) {
+		if (has_paperback && has_digital) {
+			paperback['price'] = extract_prices(prices_all?.first()?.text())
+			digital['price'] = extract_prices(prices_all?.last()?.text())
+		}
+
+		if (has_paperback && !has_digital) {
+			paperback['price'] = extract_prices(prices_all?.first()?.text())
+		}
+		if (has_digital && !has_paperback) {
+			digital['price'] = extract_prices(prices_all?.first()?.text())
+		}
+
+		// Paperback always first is there is one?
+		for (const box of book_details_info.first().find('div.detail-box')?.children()) {
 			const $box = $(box)
-			switch ($box?.text().toLowerCase()) {
-				case 'trim size':
-					const trim_split = $box?.next()?.text().trim()?.split('x')
+			// Only in paperback
+			if ($box?.text().toLowerCase() == 'trim size') {
+				const trim_split = $box?.next()?.text().trim()?.split('x')
 					const w = Number(trim_split?.[0]?.replace('"', '')) || null
 					const h = Number(trim_split?.[1]?.replace('"', '')) || null
 					const w_mm = w? w * 25.4 : null
 					const h_mm = h? h * 25.4 : null
-					volume['trim'] = {'w': w_mm, 'h': h_mm, 'unit': 'mm'}
-					break
-				case 'page count':
-					volume['pages'] = Number($box?.next()?.text().replace(' pages', '').trim()) || null
-					break
-				case 'release date':
-					volume['date'] = string_to_date($box?.next()?.text().trim())?.toJSDate() || null
-					break
-				case 'age rating':
-					volume['maturity_rating'] = $box?.next()?.text().trim().replace(/\s\(.*\)$/, '')
+					paperback['trim'] = {'w': w_mm, 'h': h_mm, 'unit': 'mm'}
+			}
+			if ($box?.text().toLowerCase() == 'age rating') {
+				if (has_paperback) {
+					paperback['maturity_rating'] = $box?.next()?.text().trim().replace(/\s\(.*\)$/, '')
+				}
+				if (has_digital) {
+					digital['maturity_rating'] = $box?.next()?.text().trim().replace(/\s\(.*\)$/, '')
+				}
+			}
+			if (tabs.startsWith('paperback') && $box?.text().toLowerCase() == 'page count') {
+				paperback['pages'] = Number($box?.next()?.text().replace(' pages', '').trim()) || null
+			}
+			if (!has_paperback && has_digital && $box?.text().toLowerCase() == 'page count') {
+				digital['pages'] = Number($box?.next()?.text().replace(' pages', '').trim()) || null
+			}
+			if (tabs.startsWith('paperback') && $box?.text().toLowerCase() == 'release date') {
+				paperback['date'] = string_to_date($box?.next()?.text().trim())?.toJSDate() || null
+			}
+			if (!has_paperback && has_digital && $box?.text().toLowerCase() == 'release date') {
+				digital['date'] = string_to_date($box?.next()?.text().trim())?.toJSDate() || null
+			}
+			if (!has_paperback && has_digital && $box?.text().toLowerCase() == 'isbn') {
+				digital['isbn'] = $box?.next()?.text().trim()
 			}
 		}
-		
-		volume['slug'] = slug
-		volume['title'] = series_title_details['series_subtitle']
-		volume['number'] = series_title_details['number']
-		volume['link'] = url
-		volume['cover'] = $('div.book-cover-img img')?.attr('data-src')
-		volume['isbn'] = slug?.slice(0, 13) || null
-		volume['price'] = [{'value': price_us, 'iso_code': 'usd'}, {'value': price_can, 'iso_code': 'cad'}]
-		volume['distributor'] = {'name': 'Yen Press', 'link': 'https://yenpress.com'}
-		volume['imprint'] = {'name': imprint, 'link': imprints[imprint as keyof typeof imprints], 'imprint': true}
-		volume['description'] = $('.content-heading div.content-heading-txt p.paragraph')?.text()?.trim()
-		volume['staff'] = staff
-		volume['genres'] = genres
-		volumes.push(volume)
+		// If there is both, have to run second
+		// Hate this but can't think of a better way atm
+		if (has_paperback && has_digital) {
+			for (const box of book_details_info.last().find('div.detail-box')?.children()) {
+				const $box = $(box)
+				if ($box?.text().toLowerCase() == 'page count') {
+					digital['pages'] = Number($box?.next()?.text().replace(' pages', '').trim()) || null
+				}
+				if ($box?.text().toLowerCase() == 'release date') {
+					digital['date'] = string_to_date($box?.next()?.text().trim())?.toJSDate() || null
+				}
+				if ($box?.text().toLowerCase() == 'isbn') {
+					digital['isbn'] = $box?.next()?.text().trim()
+				}
+			}
+		}
+		// Imprint frequently div not tagged with class detail-box...
+		const imprint = book_details.find('div.detail-info span:contains("Imprint")')?.first()?.next()?.text()
+
+		const genres = book_details.find('div.detail-labels').first()?.children('a').map(function (i, ele) {
+			return $(ele).text()
+		}).toArray()
+
+		if (has_paperback) {
+			paperback['slug'] = slug
+			paperback['title'] = series_title_details['series_subtitle']
+			paperback['number'] = book_title_details['number']
+			paperback['link'] = url
+			paperback['cover'] = $('div.book-cover-img img')?.attr('data-src')
+			paperback['isbn'] = slug?.slice(0, 13) || null
+			paperback['distributor'] = {'name': 'Yen Press', 'link': 'https://yenpress.com'}
+			paperback['imprint'] = {'name': imprint, 'link': imprints[imprint as keyof typeof imprints], 'imprint': true}
+			paperback['description'] = $('.content-heading div.content-heading-txt p.paragraph')?.text()?.trim()
+			paperback['staff'] = staff
+			paperback['genres'] = genres
+			works.push(paperback)
+		}
+
+		if (has_digital) {
+			digital['slug'] = slug
+			digital['title'] = series_title_details['series_subtitle']
+			digital['number'] = book_title_details['number']
+			digital['link'] = url
+			digital['cover'] = $('div.book-cover-img img')?.attr('data-src')
+			digital['distributor'] = {'name': 'Yen Press', 'link': 'https://yenpress.com'}
+			digital['imprint'] = {'name': imprint, 'link': imprints[imprint as keyof typeof imprints], 'imprint': true}
+			digital['description'] = $('.content-heading div.content-heading-txt p.paragraph')?.text()?.trim()
+			digital['staff'] = staff
+			digital['genres'] = genres
+			digital['digital'] = true
+			works.push(digital)
+		}
 
 		const related_section = $('section.creators div.inner-slider-section').find('a')
 
@@ -216,14 +284,23 @@ export async function parse_book_page(slug: string): Promise<Record<string, any>
 		series_data['related'] = related
 
 		if (series_title_details['is_chapter']) {
-			series_data['chapters'] = volumes
+			series_data['chapters'] = works
 		} else {
-			series_data['volumes'] = volumes
+			series_data['volumes'] = works
 		}
 
-		series_data['distributor'] = volume['distributor']
-		series_data['imprint'] = volume['imprint']
-		series_data['type'] = imprint == 'Ize Press' ? 'manhwa' : series_title_details['type']
+		series_data['distributor'] = paperback['distributor'] || digital['distributor']
+		series_data['imprint'] = paperback['imprint'] || digital['imprint']
+		switch (imprint) {
+			case 'Ize Press':
+				series_data['type'] = 'manhwa'
+				break
+			case 'Yen Audio':
+				series_data['type'] = 'audiobook'
+				break
+			default:
+				series_title_details['type']
+		}
 
 		return YenPressMangaBakaSeries.strict().parse(series_data)
 
@@ -359,17 +436,33 @@ export async function parse_series_page(slug: string): Promise<YenPressMangaBaka
 }
 
 function clean_series_title(series_title: string): Record<string, any> {
-	// The demon regex and I don't have a licence!
-	const series_title_main = /^(?<title>.*?)(?:\s\((?<type>(.*?))\))?(?:,\s(?:vol.|chapter)\s(?<num>\d+.\d+|\d+))?(?:[:-]\s(?<subtitle>\w.*?))?$/i.exec(series_title)
+	// We will take multiple bites at the title to make things easier
+	const book_number = /.*(?:vol.|volume|chapter)\s(\d+.\d+|\d+)/i.exec(series_title)?.[1] || null
+	// Will get overridden later if Ize imprint
+	let series_type = /\s\(((.*?))\)/i.exec(series_title)?.[1] || null
+	if (series_type === null) {
+		series_type = 'manga'
+	} else {
+		// Check for allowed
+		switch (series_type.toLowerCase()) {
+			case 'manga':
+			case 'light novel':
+			case 'novel':
+			case 'comic':
+				series_title = series_title.replace('(' + series_type + ')', '')
+				break
+		}
+	}
+	series_type = series_type.toLowerCase()
+
+	const series_title_main = /^(?<title>.*?)(?:\s(?:vol.|volume|chapter)\s(?<num>\d+.\d+|\d+))?(?:[:-]\s(?<subtitle>\w.*?))?$/i.exec(series_title)
 	let series_title_clean: string = ''
-	let series_type: string = 'manga'
-	let book_number: string | null = null
+	// let series_type: string = 'manga'
 	let series_subtitle: string | null = null
 	const is_chapter_series: boolean = series_title.toLowerCase().includes('chapter')
 	if (series_title_main && series_title_main.groups) {
-		series_title_clean = series_title_main.groups.title
-		series_type = series_title_main.groups.type || 'manga'
-		book_number = series_title_main.groups.num || null
+		series_title_clean = series_title_main.groups.title.trim()
+		// series_type = series_title_main.groups.type || 'manga'
 		series_subtitle = series_title_main.groups.subtitle || null
 	}
 	return {
@@ -380,108 +473,3 @@ function clean_series_title(series_title: string): Record<string, any> {
 		'is_chapter': is_chapter_series
 	}
 }
-
-/*
-export function worker_produce(worker: QueueClient) {
-	//const log = Logger.label('ann_news_schedule_refresh')
-
-	const options: TraceOptions & tracer.SpanOptions = {
-		tags: {
-			[tags.MANUAL_KEEP]: true,
-			[tags.SPAN_KIND]: kinds.PRODUCER,
-			[tags.SPAN_TYPE]: 'worker',
-		},
-	}
-
-	return tracer.wrap('ann_news_schedule_refresh', options, async () => {
-		const rows = await SourceAnimeNewsNetwork.scope('due_for_update').findAll()
-		if (rows.length == 0) {
-			log.debug('No AnimeNewsNetwork entries due for news refresh')
-
-			return
-		}
-
-		for (const row of rows) {
-			log.info('AnimeNewsNetwork', row.id, 'will be scheduled for news refresh')
-
-			await update_last_scheduled_at(row)
-			await worker.send(Queue.news_ann_work, { id: row.id })
-		}
-	})
-}
-
-export async function worker_consume_batch(jobs: RefreshSeriesNewsPayload) {
-	const log = Logger.label('ann_refresh_news_batch')
-	log.info('Processing', jobs.length, 'jobs concurrently')
-
-	await Promise.allSettled(
-		jobs.map(async (job) => {
-			try {
-				await worker_consume([job])
-				await QueueClient.Worker.boss.complete(Queue.news_ann_work.name, job.id)
-			} catch (err) {
-				await QueueClient.Worker.boss.fail(Queue.news_ann_work.name, job.id, err as object)
-			}
-		}),
-	)
-
-	log.info('Done processing', jobs.length, 'jobs concurrently')
-}
-
-export async function worker_consume([job]: RefreshSeriesNewsPayload) {
-	const log = Logger.label(`ann_refresh_news`)
-
-	const options: TraceOptions & tracer.SpanOptions = {
-		tags: {
-			[tags.MANUAL_KEEP]: true,
-			[tags.SPAN_KIND]: kinds.CONSUMER,
-			[tags.SPAN_TYPE]: 'worker',
-			series: job.data,
-		},
-	}
-
-	await tracer.trace('ann_refresh_news', options, async () => {
-		// ! Don't wrap in a big transaction, it can be incredible slow and failing one entry
-		// ! would undo all of them
-
-		const row = await SourceAnimeNewsNetwork.findByPk(job.data.id)
-		if (!row) {
-			log.warn('could not find AnimeNewsNetwork row with ID', job.data.id)
-			return
-		}
-
-		log.info('Updating AnimeNewsNetwork entry [', row.id, ']')
-
-		await refresh_news(row)
-	})
-}
-
-function update_last_scheduled_at(row: SourceAnimeNewsNetwork) {
-	row.last_scheduled_at = new Date()
-	return row.save()
-}
-
-export async function worker_consume_discover_new_entries() {
-	const log = Logger.label(`worker_consume_discover_new_entries`)
-
-	const resp = await axios.get(`https://www.animenewsnetwork.com/encyclopedia/reports.xml?id=149`)
-	const result = parser.toJson(resp.data, { object: true, coerce: true })
-	const report = result.report as { item: any[] }
-
-	for (const item of report.item as any[]) {
-		const id = item.manga.href.split('?id=')[1]
-		if (!id) {
-			log.warn('Could not find ID for encyclopedia entry')
-			continue
-		}
-
-		const [, created] = await SourceAnimeNewsNetwork.findOrCreate({
-			where: { id },
-		})
-
-		if (created) {
-			log.info('Discovered new ANN encyclopedia entry', id)
-		}
-	}
-}
-*/
