@@ -195,7 +195,7 @@ export async function parse_book_page(slug: string): Promise<Record<string, any>
 			if (!has_paperback && has_digital && $box?.text().toLowerCase() == 'page count') {
 				digital['pages'] = Number($box?.next()?.text().replace(' pages', '').trim()) || null
 			}
-			if (tabs.startsWith('paperback') && $box?.text().toLowerCase() == 'release date') {
+			if ((tabs.startsWith('paperback') || tabs.startsWith('audio')) && $box?.text().toLowerCase() == 'release date') {
 				paperback['date'] = string_to_date($box?.next()?.text().trim())?.toJSDate() || null
 			}
 			if (!has_paperback && has_digital && $box?.text().toLowerCase() == 'release date') {
@@ -449,6 +449,7 @@ function clean_series_title(series_title: string): Record<string, any> {
 			case 'light novel':
 			case 'novel':
 			case 'comic':
+			case 'audio':
 				series_title = series_title.replace('(' + series_type + ')', '')
 				break
 		}
